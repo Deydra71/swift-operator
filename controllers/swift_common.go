@@ -19,18 +19,26 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
+	"github.com/openstack-k8s-operators/swift-operator/pkg/swiftproxy"
 	"k8s.io/apimachinery/pkg/types"
-	"time"
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // fields to index to reconcile when change
@@ -139,4 +147,46 @@ func verifyServiceSecret(
 	}
 	(*envVars)[secretName.Name] = env.SetValue(hash)
 	return ctrl.Result{}, nil
+}
+
+// AddKeystoneOverridesWatches adds keystone-overrides secret watches to the passed controller builder
+func AddKeystoneOverridesWatches(b *builder.Builder) *builder.Builder {
+	keystoneOverridesMap := handler.MapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+		name := obj.GetName()
+		ns := obj.GetNamespace()
+
+		// Only handle Secret objects
+		if _, isSecret := obj.(*corev1.Secret); !isSecret {
+			return nil
+		}
+
+		// Check if secret has the keystone-overrides label set to "true"
+		labels := obj.GetLabels()
+		if labels == nil {
+			return nil
+		}
+
+		if _, hasLabel := labels[swiftproxy.KeystoneOverridesLabel]; !hasLabel {
+			return nil
+		}
+
+		svc := "swift"
+		if name != "keystone-overrides" && strings.HasSuffix(name, "-keystone-overrides") {
+			svc = strings.TrimSuffix(name, "-keystone-overrides")
+		}
+
+		// enqueue reconcile only for swift proxy controller
+		return []reconcile.Request{
+			{NamespacedName: types.NamespacedName{Namespace: ns, Name: svc + "-proxy"}},
+		}
+	})
+
+	// watch the keystone-overrides secret
+	b = b.Watches(
+		&corev1.Secret{},
+		handler.EnqueueRequestsFromMapFunc(keystoneOverridesMap),
+		builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+	)
+
+	return b
 }

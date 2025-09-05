@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -49,6 +50,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/endpoint"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/keystone"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
@@ -473,9 +475,53 @@ func (r *SwiftProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	keystoneInternalURL, err := keystoneAPI.GetEndpoint(endpoint.EndpointInternal)
+
+	// Check for keystone overrides for multi-region deployments
+	keystoneOverrides, err := keystone.GetKeystoneOverridesByLabel(
+		ctx, helper, instance.Namespace, "keystone-overrides")
 	if err != nil {
-		return ctrl.Result{}, err
+		// Log the error but continue with defaults - keystone overrides are optional
+		helper.GetLogger().V(1).Info("Could not get keystone overrides, using defaults", "error", err.Error())
+		keystoneOverrides = map[string]string{}
+	}
+
+	// Use keystone overrides if available, otherwise use defaults
+	finalKeystonePublicURL := keystonePublicURL
+	if wwwAuthURI, exists := keystoneOverrides["www_authenticate_uri"]; exists && strings.TrimSpace(wwwAuthURI) != "" {
+		finalKeystonePublicURL = strings.TrimSpace(wwwAuthURI)
+	} else if authURL, exists := keystoneOverrides["auth_url"]; exists && strings.TrimSpace(authURL) != "" {
+		finalKeystonePublicURL = strings.TrimSpace(authURL)
+	}
+	finalKeystoneInternalURL := keystonePublicURL
+	if authURL, exists := keystoneOverrides["auth_url"]; exists && strings.TrimSpace(authURL) != "" {
+		finalKeystoneInternalURL = strings.TrimSpace(authURL)
+	}
+	finalRegion := ""
+	if region, exists := keystoneOverrides["region"]; exists && strings.TrimSpace(region) != "" {
+		finalRegion = strings.TrimSpace(region)
+	}
+
+	if len(keystoneOverrides) > 0 {
+		logArgs := []interface{}{}
+		if finalKeystonePublicURL != keystonePublicURL {
+			logArgs = append(logArgs, "public_url", finalKeystonePublicURL)
+		}
+		if finalKeystoneInternalURL != keystonePublicURL {
+			logArgs = append(logArgs, "internal_url", finalKeystoneInternalURL)
+		}
+		if finalRegion != "" {
+			logArgs = append(logArgs, "region", finalRegion)
+		}
+		if len(logArgs) > 0 {
+			Log.Info("Using keystone overrides for multi-region deployment", logArgs...)
+		}
+
+		// Add keystone overrides to envVars for hash calculation
+		keystoneOverridesHash, err := util.ObjectHash(keystoneOverrides)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("error creating keystone overrides hash: %w", err)
+		}
+		envVars["keystoneOverridesHash"] = env.SetValue(keystoneOverridesHash)
 	}
 
 	// Create common and RBAC OpenStack roles
@@ -483,6 +529,12 @@ func (r *SwiftProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Set final region if not already set from overrides
+	if finalRegion == "" {
+		finalRegion = os.GetRegion()
+	}
+
 	_, err = os.CreateRole(Log, "swiftoperator")
 	if err != nil {
 		return ctrl.Result{}, err
@@ -574,13 +626,13 @@ func (r *SwiftProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	tpl := swiftproxy.SecretTemplates(
 		instance,
 		serviceLabels,
-		keystonePublicURL,
-		keystoneInternalURL,
+		finalKeystonePublicURL,
+		finalKeystoneInternalURL,
 		password,
 		memcached,
 		bindIP,
 		secretRef,
-		os.GetRegion(),
+		finalRegion,
 		transportURLString,
 	)
 	err = secret.EnsureSecrets(ctx, helper, instance, tpl, &envVars)
@@ -835,7 +887,7 @@ func (r *SwiftProxyReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 		return nil
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	cBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&swiftv1beta1.SwiftProxy{}).
 		Owns(&corev1.Secret{}).
 		Owns(&keystonev1.KeystoneService{}).
@@ -855,8 +907,12 @@ func (r *SwiftProxyReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&keystonev1.KeystoneAPI{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectForSrc),
-			builder.WithPredicates(keystonev1.KeystoneAPIStatusChangedPredicate)).
-		Complete(r)
+			builder.WithPredicates(keystonev1.KeystoneAPIStatusChangedPredicate))
+
+	// Add keystone-overrides secret watcher for SKMO support
+	cBuilder = AddKeystoneOverridesWatches(cBuilder)
+
+	return cBuilder.Complete(r)
 }
 
 func (r *SwiftProxyReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {

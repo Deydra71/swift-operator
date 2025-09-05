@@ -21,4 +21,7 @@ const (
 
 	// Same as in OOO to be backward compatible
 	BarbicanSecretName = "swift_root_secret_uuid"
+
+	// KeystoneOverridesLabel label for marking secrets containing keystone overrides for SKMO
+	KeystoneOverridesLabel = "keystone-overrides"
 )
