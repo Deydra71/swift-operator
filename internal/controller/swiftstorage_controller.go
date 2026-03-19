@@ -56,6 +56,7 @@ import (
 	"github.com/openstack-k8s-operators/swift-operator/internal/swiftstorage"
 
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
@@ -90,6 +91,7 @@ type Netconfig struct {
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 //+kubebuilder:rbac:groups=memcached.openstack.org,resources=memcacheds,verbs=get;list;watch;
 //+kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata,verbs=get;list;watch;create;update;patch;delete
@@ -403,6 +405,12 @@ func (r *SwiftStorageReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrlResult, nil
 	}
 
+	// Reconcile backup labels on existing PVCs that were created before
+	// backup/restore support was added
+	if err := r.reconcilePVCLabels(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	deploy := sset.GetStatefulSet()
 	if deploy.Generation == deploy.Status.ObservedGeneration {
 		instance.Status.ReadyCount = deploy.Status.ReadyReplicas
@@ -624,6 +632,38 @@ func (r *SwiftStorageReconciler) createHashOfInputHashes(
 		instance.Status.Hash = hashMap
 	}
 	return hash, changed, nil
+}
+
+// reconcilePVCLabels ensures backup/restore labels are set on Swift storage PVCs.
+// StatefulSet VolumeClaimTemplates are immutable, so for existing environments
+// we reconcile PVC labels directly.
+func (r *SwiftStorageReconciler) reconcilePVCLabels(
+	ctx context.Context,
+	instance *swiftv1beta1.SwiftStorage,
+) error {
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{
+			common.AppSelector:       swift.ServiceName,
+			common.ComponentSelector: swiftstorage.ComponentName,
+		},
+	}
+	if err := r.List(ctx, pvcList, listOpts...); err != nil {
+		return fmt.Errorf("listing PVCs for %s: %w", instance.Name, err)
+	}
+
+	for i := range pvcList.Items {
+		if _, err := backup.EnsureBackupLabels(ctx, r.Client, &pvcList.Items[i],
+			util.MergeMaps(
+				backup.GetBackupLabels(backup.CategoryControlPlane),
+				backup.GetRestoreLabels(backup.RestoreOrder00, backup.CategoryControlPlane),
+			)); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func getPodIPInNetwork(swiftPod corev1.Pod, namespace string, networkAttachment string) (string, error) {
