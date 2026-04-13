@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
@@ -243,6 +244,11 @@ func (r *SwiftRingReconciler) reconcileNormal(ctx context.Context, instance *swi
 		instance.Status.Hash[swiftv1beta1.RingCreateHash] = ringCreateJob.GetHash()
 	}
 
+	// Ensure backup labels on the ring ConfigMap for backup/restore
+	if err := r.reconcileRingConfigMapLabels(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 	instance.Status.Conditions.MarkTrue(swiftv1beta1.SwiftRingReadyCondition, condition.ReadyMessage)
 	// Swift ring init job - end
@@ -255,6 +261,36 @@ func (r *SwiftRingReconciler) reconcileNormal(ctx context.Context, instance *swi
 	}
 	Log.Info(fmt.Sprintf("Reconciled SwiftRing '%s' successfully", instance.Name))
 	return ctrl.Result{}, nil
+}
+
+// reconcileRingConfigMapLabels ensures backup/restore labels are set on the
+// ring ConfigMap. The ring ConfigMap is created by the rebalance job (not by
+// the controller), so we reconcile labels after the job completes.
+func (r *SwiftRingReconciler) reconcileRingConfigMapLabels(
+	ctx context.Context,
+	instance *swiftv1beta1.SwiftRing,
+) error {
+	if len(instance.Spec.RingConfigMaps) == 0 {
+		return nil
+	}
+
+	ringCM := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{
+		Name:      instance.Spec.RingConfigMaps[0],
+		Namespace: instance.Namespace,
+	}, ringCM)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	if _, err := backup.EnsureBackupLabels(ctx, r.Client, ringCM,
+		backup.GetRestoreLabels(backup.RestoreOrder10, backup.CategoryControlPlane)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *SwiftRingReconciler) reconcileDelete(ctx context.Context, instance *swiftv1beta1.SwiftRing, helper *helper.Helper) (ctrl.Result, error) {

@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
@@ -66,6 +67,7 @@ func (r *SwiftReconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update;patch
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=nonroot-v2,resources=securitycontextconstraints,verbs=use
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -237,6 +239,11 @@ func (r *SwiftReconciler) reconcileNormal(ctx context.Context, instance *swiftv1
 	}
 
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+
+	// Ensure backup labels on the swift-conf Secret for existing environments
+	if err := r.reconcileSwiftConfLabels(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	//
 	// Check for required memcached used for caching
@@ -411,6 +418,28 @@ func (r *SwiftReconciler) reconcileNormal(ctx context.Context, instance *swiftv1
 	}
 	Log.Info(fmt.Sprintf("Reconciled Service '%s' successfully", instance.Name))
 	return ctrl.Result{}, nil
+}
+
+// reconcileSwiftConfLabels ensures backup labels are set on the swift-conf
+// Secret for existing environments that were created before backup support.
+func (r *SwiftReconciler) reconcileSwiftConfLabels(ctx context.Context, instance *swiftv1.Swift) error {
+	swiftConfSecret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{
+		Name:      swift.SwiftConfSecretName,
+		Namespace: instance.Namespace,
+	}, swiftConfSecret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	if _, err := backup.EnsureBackupLabels(ctx, r.Client, swiftConfSecret,
+		backup.GetRestoreLabels(backup.RestoreOrder10, backup.CategoryControlPlane)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

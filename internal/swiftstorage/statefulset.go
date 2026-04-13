@@ -25,7 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	swiftv1beta1 "github.com/openstack-k8s-operators/swift-operator/api/v1beta1"
 	"github.com/openstack-k8s-operators/swift-operator/internal/swift"
 )
@@ -264,6 +266,10 @@ func StatefulSet(
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: swift.ClaimName,
+					Labels: util.MergeStringMaps(
+						backup.GetBackupLabels(backup.CategoryControlPlane),
+						backup.GetRestoreLabels(backup.RestoreOrder00, backup.CategoryControlPlane),
+					),
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
 					StorageClassName: &swiftstorage.Spec.StorageClass,

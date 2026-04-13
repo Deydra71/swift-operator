@@ -17,6 +17,7 @@ limitations under the License.
 package swift
 
 import (
+	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	swiftv1beta1 "github.com/openstack-k8s-operators/swift-operator/api/v1beta1"
 )
@@ -26,6 +27,15 @@ func SecretTemplates(instance *swiftv1beta1.Swift, serviceLabels map[string]stri
 	templateParameters := make(map[string]any)
 	templateParameters["SwiftHashPathPrefix"] = RandomString(16)
 	templateParameters["SwiftHashPathSuffix"] = RandomString(16)
+
+	// Add backup labels so the swift-conf Secret is included in backups.
+	// This Secret contains swift_hash_path_prefix/suffix which cannot be
+	// regenerated — without it Swift cannot locate existing objects.
+	serviceLabels = util.MergeStringMaps(
+		serviceLabels,
+		backup.GetBackupLabels(backup.CategoryControlPlane),
+		backup.GetRestoreLabels(backup.RestoreOrder10, backup.CategoryControlPlane),
+	)
 
 	return []util.Template{
 		{
