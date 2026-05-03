@@ -5,7 +5,7 @@
     attempts: 1
     required-projects:
       - github.com/openstack-k8s-operators/swift-operator
-    irrelevant-files:
+    irrelevant-files: &common-irrelevant-files
       - .*/*.md
       - ^\..*$
       - ^LICENSE$
@@ -21,6 +21,7 @@
 - job:
     name: swift-operator-tempest
     parent: podified-multinode-edpm-deployment-crc-2comp
+    irrelevant-files: *common-irrelevant-files
     vars:
       cifmw_test_operator_concurrency: 3
       cifmw_test_operator_tempest_include_list: |
